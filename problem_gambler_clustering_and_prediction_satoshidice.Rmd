@@ -1,0 +1,462 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+# The Dataset
+
+The following piece of script needs the precalculated datasets placed in the same directory.The dataset is downloadable from the file sharing service detailed in the README.md file or recreated following the steps there.
+
+The script below does a bunch of calculations on all the input files:
+  * Creates lead quantities, so we know the outcome and behaviour of the next bet
+  * Create user aggregates, like balance, total sum ammount, total win ammount
+  * Calculates absolute and relative changes of game descriptiors between consequent games
+  * Labels and calculates game streaks (winning/losing) length and extent
+  * Prepares scaled version of the prepared quantities (mostly only centered)
+  
+Important quantities created (for this article that is):
+  * time_bet - unixtime of the bet transaction (timestamp of the block)
+  * bet_value - transformed from bet ammount in satoshi to bitcoin (1 satoshi = 1e-8 BTC)
+  * streak - length of streak (win/loss) 0 signs that the outcome is different from the previous game's
+  * label - identifier of the sample, check the bitcoin_pricehistory_lowvar.R script for details
+  * pwin - implied probability of winning (0-100), set from the scraped data, defined using the address the bet has been sent to
+  * status_pred - status of the next game played 
+  * pwin_pred - pwin of the following game
+  * game_changed - logical variable, TRUE if a different game (pwin/odds/mulitplier) have been bet on after the current game
+
+```{r echo=FALSE, cache=FALSE, results=FALSE, warning=FALSE, comment=FALSE, warning=FALSE}
+# require(groundhog)
+# groundhog.day="2021-03-01"
+# pkgs=c('tidyverse','ggpubr')
+# groundhog.library(pkgs, groundhog.day)
+library(tidyverse)
+
+#change this to wherever you put your stuff
+#WORKDIR <- "/Users/sandorm/bce-bitluck" #set this for your own working directory
+WORKDIR <- "C:/Users/sampa/Documents/bce-bitluck" #set this for your own working directory
+
+normalizeToBitcoin <- function(user_bets){
+  user_bets %>% 
+    mutate(bet_value = bet_value * 1e-8,
+           answer_value = answer_value * 1e-8)
+}
+
+aggregateUser <- function(user_bets){
+  user_bets %>% 
+    mutate(last_outcome = answer_value - bet_value,
+           win_answer_value = ifelse(status == "win",answer_value - bet_value,0),
+           loose_answer_value = ifelse(status == "loss",answer_value - bet_value,0)) %>%
+    mutate(dice_balance = cumsum(answer_value - bet_value),
+           winsum = cumsum(win_answer_value),
+           loosesum = cumsum(loose_answer_value))
+  
+}
+
+addlag <- function(user_bets){
+  user_bets %>% 
+    mutate(bet_pred = lead(bet_value, n = 1),
+           game_pred = lead(odds, n = 1),
+           time_nextbet = lead(time_bet, n = 1),
+           status_pred = lead(status, n = 1))
+}
+# gametable mined from https://web.archive.org/web/20130403062213/http://www.satoshidice.com/
+pwin_to_prob <- c(
+  "lessthan","64000","1dice9wVtrKZTBbAZqz1XiTmboYyvpD3t","97.6563","1.004","1.900","98.100","0.0010","250.0000",
+  "lessthan","60000","1diceDCd27Cc22HV3qPNZKwGnZ8QwhLTc","91.5527","1.071","1.900","98.100","0.0010","250.0000",
+  "lessthan","56000","1dicegEArYHgbwQZhvr5G9Ah2s7SFuW1y","85.4492","1.147","1.900","98.100","0.0010","250.0000",
+  "lessthan","52000","1dicec9k7KpmQaA8Uc8aCCxfWnwEWzpXE","79.3457","1.235","1.900","98.100","0.0010","250.0000",
+  "lessthan","48000","1dice9wcMu5hLF4g81u8nioL5mmSHTApw","73.2422","1.338","1.900","98.100","0.0010","250.0000",
+  "lessthan","32768","1dice97ECuByXAvqXpaYzSaQuPVvrtmz6","50.0000","1.957","1.900","98.100","0.0010","250.0000",
+  "lessthan","32000","1dice8EMZmqKvrGE4Qc9bUFf9PX3xaYDp","48.8281","2.004","1.900","98.100","0.0010","250.0000",
+  "lessthan","24000","1dice7W2AicHosf5EL3GFDUVga7TgtPFn","36.6211","2.670","1.900","98.100","0.0010","250.0000",
+  "lessthan","16000","1dice7fUkz5h4z2wPc1wLMPWgB5mDwKDx","24.4141","4.003","1.900","98.100","0.0010","219.6353",
+  "lessthan","12000","1dice7EYzJag7SxkdKXLr8Jn14WUb3Cf1","18.3105","5.335","1.900","98.100","0.0010","152.1241",
+  "lessthan","8000","1dice6YgEVBf88erBFra9BHf6ZMoyvG88","12.2070","8.000","1.900","98.100","0.0010","120.9568",
+  "lessthan","6000","1dice6wBxymYi3t94heUAG6MpG5eceLG1","9.1553","10.666","1.900","98.100","0.0010","120.9090",
+  "lessthan","4000","1dice6GV5Rz2iaifPvX7RMjfhaNPC8SXH","6.1035","15.996","1.900","98.100","0.0010","77.9318",
+  "lessthan","3000","1dice6gJgPDYz8PLQyJb8cgPBnmWqCSuF","4.5776","21.326","1.900","98.100","0.0010","57.4951",
+  "lessthan","2000","1dice6DPtUMBpWgv8i4pG8HMjXv9qDJWN","3.0518","31.987","1.900","98.100","0.0010","59.3926",
+  "lessthan","1500","1dice61SNWEKWdA8LN6G44ewsiQfuCvge","2.2888","42.647","1.900","98.100","0.0010","44.1897",
+  "lessthan","1000","1dice5wwEZT2u6ESAdUGG6MHgCpbQqZiy","1.5259","63.968","1.900","98.100","0.0010","29.2270",
+  "lessthan","512","1dice4J1mFEvVuFqD14HzdViHFGi9h4Pp","0.7813","124.933","1.900","98.100","0.0010","14.8497",
+  "lessthan","256","1dice3jkpTvevsohA4Np1yP4uKzG1SRLv","0.3906","249.861","1.900","98.100","0.0010","7.3951",
+  "lessthan","128","1dice37EemX64oHssTreXEFT3DXtZxVXK","0.1953","499.717","1.900","98.100","0.0010","3.6902",
+  "lessthan","64","1dice2zdoxQHpGRNaAWiqbK82FQhr4fb5","0.0977","999.429","1.900","98.100","0.0010","3.2050",
+  "lessthan","32","1dice2xkjAAiphomEJA5NoowpuJ18HT1s","0.0488","1998.853","1.900","98.100","0.0010","1.6017",
+  "lessthan","16","1dice2WmRTLf1dEk4HH3Xs8LDuXzaHEQU","0.0244","3997.701","1.900","98.100","0.0010","0.8006",
+  "lessthan","8","1dice2vQoUkQwDMbfDACM1xz6svEXdhYb","0.0122","7995.397","1.900","98.100","0.0010","0.4002",
+  "lessthan","4","1dice2pxmRZrtqBVzixvWnxsMa7wN2GCK","0.0061","15990.789","1.900","98.100","0.0010","0.2001",
+  "lessthan","2","1dice1Qf4Br5EYjj9rnHWqgMVYnQWehYG","0.0031","31981.573","1.900","98.100","0.0010","0.1000",
+  "lessthan","1","1dice1e6pdhLzzWQq7yMidf6j8eAg7pkY","0.0015","64000.000","1.844","98.156","0.0010","0.0500") %>%
+  matrix(ncol = 9, byrow = T, dimnames = list(NULL,c("Name","Name2","Address","pwin","odds","House cut (%)","Expected return (%)","Min bet (BTC)","Max bet (BTC)"))) %>%
+  as_tibble() %>%
+  select(odds,pwin) %>%
+  type_convert()
+
+extractAndPrepareUser <- function(x,...){
+  ret <- x %>%
+    arrange(time_bet) %>% 
+    normalizeToBitcoin() %>% 
+    addlag() %>% 
+    aggregateUser() %>% 
+    left_join(pwin_to_prob, by = "odds") %>%
+    left_join(pwin_to_prob %>% rename(pwin_pred = pwin), by = c("game_pred" = "odds")) %>%
+    mutate(bet_changed = bet_pred != bet_value,
+           game_changed = game_pred != odds,
+           exp_changed = bet_pred*game_pred != bet_value*odds,
+           bet_changed_factor = sign(bet_value-bet_pred) %>% factor(levels = c(0,1,-1)),
+           game_changed_factor = sign(game_pred-odds) %>% factor(levels = c(0,1,-1)),
+           exp_changed_factor = sign(bet_pred*game_pred - bet_value*odds) %>% factor(levels = c(0,1,-1)),
+           expectation = bet_pred*game_pred,
+           exp_change_ratio = log(bet_pred*game_pred/(bet_value*odds)),
+           bet_change_ratio = log(bet_pred/bet_value),
+           game_diff_ratio = log(pwin_pred/pwin),
+           win_cumm_log = log10(1+abs(winsum)),
+           loose_cumm_log = log10(1+abs(loosesum)),
+           dice_balance_log = log10(1+abs(dice_balance)),
+           dice_balance_sign = as.character(sign(dice_balance)),
+           streak = 0,
+           difftime = time_nextbet - time_bet,
+           stayed = !((time_nextbet - time_bet) > 4*3600) & (timediff < 3600),
+           stay_length = 1,
+           game_streak = 0,
+           streak_total_length = 0,
+           streak_balance = 0) %>%
+    drop_na()
+
+  
+  for(i in 1:nrow(ret)){
+    if(i == 1){
+      ret$streak[i] = 0
+      ret$stay_length[i] = 1
+      ret$game_streak[i] = 0
+      ret$streak_balance[i] = 0
+    }else{ 
+      #win streak
+      if(ret$status[i] == ret$status[i-1]){
+        ret$streak[i] = ret$streak[i-1]+1
+        ret$streak_balance[i] = ret$streak_balance[i-1]+ret$answer_value[i]-ret$bet_value[i]
+      }else{
+        ret$streak[i] = 0
+        ret$streak_balance[i] = 0
+      }
+      #stay length 
+      if(ret$stayed[i]){
+        ret$stay_length[i] = ret$stay_length[i-1]+1
+      }else{
+        ret$stay_length[i] = 1
+      }
+      #game streak 
+      if(!ret$game_changed[i]){
+        ret$game_streak[i] = ret$game_streak[i-1]+1
+      }else{
+        ret$game_streak[i] = 0
+      }
+    }
+  }
+  
+  for(i in nrow(ret):1){
+    if(i == nrow(ret)){
+      ret$streak_total_length[i] = ret$streak[i]
+      streak_total_length = ret$streak[i]
+    }else{
+      if(streak_total_length & ret$streak[i]){
+        ret$streak_total_length[i] = streak_total_length
+      }else if(streak_total_length & !ret$streak[i]){
+        ret$streak_total_length[i] = streak_total_length
+        streak_total_length = 0
+      }else if(!streak_total_length & ret$streak[i]){
+        streak_total_length = ret$streak[i]
+        ret$streak_total_length[i] = streak_total_length
+      }else{
+        ret$streak_total_length[i] = streak_total_length
+      }
+    }
+  }
+  return(ret %>% arrange(time_bet))
+}
+
+prepare_user_table <- function(user_bets_matched, min_games = 2, ...){
+  user_bets_matched %>% 
+    drop_na() %>%
+    group_by(userID) %>% 
+    mutate(ngamez = n()) %>% 
+    filter(ngamez > min_games) %>%
+    group_modify(extractAndPrepareUser) %>%
+    ungroup()
+}
+
+#loading and processing data
+#datasets should be in calcdata folder under working directory
+setwd(WORKDIR)
+# user_bets_matched_list <- tibble(
+#   label = c("A","B","C","D","E"),
+#   start_date = c("2012-05-02", "2012-09-17", "2012-12-17", "2013-05-04", "2013-09-11"),
+#   end_date = c("2012-05-22", "2012-10-07", "2013-01-06", "2013-05-24", "2013-10-01")) %>%
+#   mutate(user_bets_matched = map2(start_date, end_date, function(x,y)read.csv(file = paste0("calcdata/satoshidice_bets_matched__",x,"_to_",y,"_clean.csv")))) %>%
+#   mutate(users_table = map(user_bets_matched, prepare_user_table))
+##
+## Loading a single dataset a time makes runtime friendlier
+##
+user_bets_matched <- read.csv(file = "calcdata/satoshidice_bets_matched__2013-09-11_to_2013-10-01_clean.csv") %>%
+  prepare_user_table()
+
+
+
+```
+
+# Creating split datasets for the trainig 
+
+```{r}
+#2013-05-24 is the end of the sample so if we want to predict 7 days after a 3 day period where the 1 day had play which meens the first playdate has to be before 2013-05-16
+
+user_play_datemap <- user_bets_matched %>%
+  mutate(date = time_bet %>% 
+           as.POSIXct(origin = "1970-01-01") %>% 
+           as.Date()) %>%
+  group_by(userID,date) %>%
+  summarize(nplays = n()) %>%
+  arrange(userID,date) %>%
+  mutate(nthday = 1:n()) %>%
+  ungroup(date) %>%
+  mutate(first_betday = min(date)) %>%
+  ungroup() %>%
+  filter(first_betday < max(date)-as.difftime(10, unit="days"))
+
+user_play_datemap %>% pull(userID) %>% unique() %>% length()
+
+user_bets_matched %>%
+  mutate(date = time_bet %>% 
+           as.POSIXct(origin = "1970-01-01") %>% 
+           as.Date())  %>% 
+  mutate(log10_bet_value = log10(bet_value),
+         payout_value = answer_value - bet_value) %>%
+  group_by(userID, date) %>%
+  summarize(ngames = log10(n()),
+            session = (sum(difftime > 3600)+1),
+            pwin_median = median(pwin),
+            pwin_width = max(pwin)-min(pwin),
+            bet_mean_log10 = mean(log10_bet_value),
+            bet_max_log10 = max(log10_bet_value),
+            payout_total = sum(payout_value)) %>%
+  ungroup() %>%
+  select(ngames, session, pwin_median, pwin_width, bet_max_log10, bet_mean_log10, payout_total) %>%
+  GGally::ggpairs(progress = F)
+
+n_obs_days <- 3
+n_predict_days <- 7
+
+userdays_observe <- user_play_datemap %>%
+  mutate(observe = ifelse(nthday < n_obs_days+1,T,F)) %>%
+  mutate(predict = ifelse(nthday %>% between(n_obs_days+1 ,n_obs_days+n_predict_days),T,F)) %>%
+  select(userID, date, observe, predict)
+  
+
+user_observation_set <- user_bets_matched %>%
+  mutate(date = time_bet %>% 
+           as.POSIXct(origin = "1970-01-01") %>% 
+           as.Date()) %>%
+  left_join(userdays_observe %>% select(-predict), by = c("userID","date")) %>%
+  filter(observe)
+
+user_predict_set <- user_bets_matched %>%
+  mutate(date = time_bet %>% 
+           as.POSIXct(origin = "1970-01-01") %>% 
+           as.Date()) %>%
+  left_join(userdays_observe %>% select(-observe), by = c("userID","date")) %>%
+  filter(predict)
+
+obs_users <- user_observation_set %>% pull(userID) %>% unique() 
+pred_users <- user_predict_set %>% pull(userID) %>% unique() 
+
+```
+
+## Creating group labels for the predict part
+
+```{r}
+#prepare dataset for clustering
+
+user_predict_stats <- user_predict_set %>%
+  mutate(log10_bet_value = log10(bet_value),
+         payout_value = answer_value - bet_value) %>%
+  group_by(userID) %>%
+  summarize(ngames = log10(n()),
+            ndays = n_distinct(date),
+            session_per_day = (sum(difftime > 3600)+1)/n_distinct(date),
+            pwin_median = median(pwin),
+            pwin_width = max(pwin)-min(pwin),
+            bet_mean_log10 = mean(log10_bet_value),
+            bet_max_log10 = max(log10_bet_value),
+            payout_total = sum(payout_value),
+            payout_total_to_median_bet = sum(payout_value)/median(bet_value),
+            .groups = "drop")
+
+#run trim kmeans
+
+scaled_predict_data <- user_predict_stats %>%
+  select(ngames, ndays, session_per_day, pwin_median, pwin_width, bet_max_log10, bet_mean_log10, payout_total) %>%
+  scale()
+
+set.seed(123)
+km.pred <- trimcluster::trimkmeans(scaled_predict_data, 2, trim = .01, runs = 100)
+
+km.pred$classification %>% table()
+
+#check clustering descriptors
+
+scaled_predict_data_2 <- scaled_predict_data %>% 
+  bind_cols(cluster = km.pred$classification) %>%
+  filter(cluster != 3) %>%
+  select(-cluster)
+
+classific <- km.pred$classification[km.pred$classification != 3]
+
+fpc::cluster.stats(d = dist(scaled_predict_data_2), classific)
+
+clValid::dunn(clusters = km.pred$classification, Data = scaled_predict_data, method = "euclidean")
+
+#examine the cluster statistics
+
+predict_data_clustered <- user_predict_stats %>% 
+  cbind(cluster = km.pred$classification)
+
+aggregate(predict_data_clustered, by=list(cluster=km.pred$classification), median)
+
+aggregate(predict_data_clustered, by=list(cluster=km.pred$classification), IQR)
+
+predict_data_clustered %>%
+  ggplot(aes(x=as.factor(cluster), y=ndays, color=as.factor(cluster))) +
+  geom_boxplot()
+
+predict_data_clustered %>%
+  ggplot(aes(x=as.factor(cluster), y=10^ngames, color=as.factor(cluster))) +
+  geom_boxplot() +
+  coord_cartesian(ylim = c(0,500))
+
+predict_data_clustered %>%
+  ggplot(aes(x=as.factor(cluster), y=pwin_median, color=as.factor(cluster))) +
+  geom_boxplot()
+
+predict_data_clustered %>%
+  ggplot(aes(x=as.factor(cluster), y=pwin_width, color=as.factor(cluster))) +
+  geom_boxplot()
+
+predict_data_clustered %>%
+  ggplot(aes(x=as.factor(cluster), y=payout_total, color=as.factor(cluster))) +
+  geom_boxplot() +
+  coord_cartesian(ylim = c(-10,2))
+
+predict_data_clustered %>%
+  ggplot(aes(x=as.factor(cluster), y=payout_total_to_median_bet, color=as.factor(cluster))) +
+  geom_boxplot() +
+  coord_cartesian(ylim = c(-100,100))
+
+#KW tests for the target variable over the two clusters (excluding the trim)
+predict_data_clustered %>% filter(cluster != 3) %>% {kruskal.test(ngames ~ cluster, data = .)}
+predict_data_clustered %>% filter(cluster != 3) %>% {kruskal.test(ndays ~ cluster, data = .)}
+predict_data_clustered %>% filter(cluster != 3) %>% {kruskal.test(session_per_day ~ cluster, data = .)}
+predict_data_clustered %>% filter(cluster != 3) %>% {kruskal.test(pwin_median ~ cluster, data = .)}
+predict_data_clustered %>% filter(cluster != 3) %>% {kruskal.test(pwin_width ~ cluster, data = .)}
+predict_data_clustered %>% filter(cluster != 3) %>% {kruskal.test(bet_max_log10 ~ cluster, data = .)}
+predict_data_clustered %>% filter(cluster != 3) %>% {kruskal.test(bet_mean_log10 ~ cluster, data = .)}
+predict_data_clustered %>% filter(cluster != 3) %>% {kruskal.test(payout_total ~ cluster, data = .)}
+```
+## Prepare input set for the autoML algorithm
+
+```{r}
+
+#add labels
+
+addict_clusters <- c(1) #this number may change depending on labeling and k
+
+predict_labels <- predict_data_clustered %>%
+  select(userID, cluster) %>%
+  rbind(tibble(userID = setdiff(obs_users,pred_users),
+               cluster = 0
+               )
+        ) %>%
+  mutate(label_stay = ifelse(cluster != 0, T, F),
+         label_addict = ifelse(cluster %in% addict_clusters, T, F))
+
+#initiating h2o server
+library(h2o)
+h2o.init()
+
+
+#preapre observation set
+user_observation_set_daily_h2o <- user_observation_set %>%
+  mutate(log10_bet_value = log10(bet_value),
+         payout_value = answer_value - bet_value) %>%
+  group_by(userID, date) %>%
+  summarize(ngames = log10(n()),
+            session = (sum(difftime > 3600)+1),
+            pwin_median = median(pwin),
+            pwin_width = max(pwin)-min(pwin),
+            bet_mean_log10 = mean(log10_bet_value),
+            bet_max_log10 = max(log10_bet_value),
+            payout_total = sum(payout_value)) %>%
+  mutate(nthday = 1:n()) %>%
+  mutate(delta_ngames = ngames-lag(ngames),
+         delta_bet_mean_log10 = bet_mean_log10-lag(bet_mean_log10)) %>%
+  ungroup() %>%
+  select(-date) %>%
+  pivot_wider(
+    names_from = nthday,
+    names_sep = "_",
+    values_from = c(ngames, session, pwin_median, pwin_width, bet_max_log10, bet_mean_log10, payout_total, delta_ngames, delta_bet_mean_log10),
+    values_fill = list(ngames = 0, 
+                       session = 0, 
+                       pwin_median = 50, 
+                       pwin_width = 0, 
+                       bet_max_log10 = -5, 
+                       bet_mean_log10 = -5, 
+                       payout_total = 0,
+                       delta_ngames = NA,
+                       delta_bet_mean_log10 = NA)
+  ) %>%
+  left_join(predict_labels, by = "userID") %>%
+  mutate(cluster = as.factor(cluster)) %>%
+  select(-delta_ngames_1) %>%
+  select(-delta_bet_mean_log10_1) %>%
+  as.h2o()
+
+#check what we have made
+h2o.no_progress() 
+h2o.describe(user_observation_set_daily_h2o)
+```
+## Prepare and run autoML for retention
+```{r}
+y <- "label_stay"
+x <- setdiff(names(user_observation_set_daily_h2o), c("userID","cluster", "label_stay","label_addict","label_addict_smallbet","label_addict_bigbet"))
+
+aml <- h2o.automl(y = y, x = x,
+                  training_frame = user_observation_set_daily_h2o,
+                  max_models = 10,
+                  seed = 123,
+                  max_runtime_secs = 300)
+```
+
+## Explore the generated model for retention
+```{r}
+aml@leaderboard
+aml@leaderboard$model_id[1] %>% as.data.frame() %>% pull() %>% h2o.getModel()
+aml@leaderboard$model_id[1] %>% as.data.frame() %>% pull() %>% h2o.getModel() %>% h2o.varimp_plot() #this will only work for non-ensemble top models
+```
+## Prepare and run autoML for problem group
+```{r}
+y <- "label_addict"
+x <- setdiff(names(user_observation_set_daily_h2o), c("userID","cluster", "label_stay","label_addict","label_addict_smallbet","label_addict_bigbet"))
+
+aml <- h2o.automl(y = y, x = x,
+                  training_frame = user_observation_set_daily_h2o,
+                  max_models = 10,
+                  seed = 123,
+                  max_runtime_secs = 300)
+```
+
+## Explore the generated model for problem group
+```{r}
+aml@leaderboard
+aml@leaderboard$model_id[1] %>% as.data.frame() %>% pull() %>% h2o.getModel()
+aml@leaderboard$model_id[1] %>% as.data.frame() %>% pull() %>% h2o.getModel() %>% h2o.varimp_plot() #this will only work for non-ensemble top models
+```
